@@ -5,7 +5,7 @@ where:
 * s = bucket starts,
 * f = suffixes
 
-Butflags: removed. we can use directly search on S[] to find the next/previous non-empty bucket, 
+Bitflags: removed. we can use an exponential search on S[] to find the next/previous non-empty bucket,
 without the need of an auxiliary bitvector.
 */
 
@@ -20,26 +20,28 @@ without the need of an auxiliary bitvector.
 #include <optional>
 
 #include "concept_type.hpp"
+#include "EF_utils.h"
 
 using u32 = uint32_t;
 using u64 = uint64_t;
 
-class BucketEFSet2 final {
+class EF2 final {
 public:
 
-    /// @brief Constructor for BucketEFSet2
+    /// @brief Constructor for EF2
     /// @param sorted_vals an ascending sorted vector of unique integers in [0, universe)
     /// @param universe a positive integer representing the universe size
-    BucketEFSet2 (std::span<const u64> sorted_vals) : m(sorted_vals.size()), n(sorted_vals.back() + 1) {
-        
-        checkInput(sorted_vals, n);
+    EF2 (std::span<const u64> sorted_vals) : m(sorted_vals.size()) {
+
+        checkInput(sorted_vals);
+        n = sorted_vals.back() + 1;
         
         m_bitsForM = std::bit_width(m); 
         m_bitsForN = ceilLog2(n); 
         
-        const u64 log2m = std::max<u64>(1, floorLog2(m));
-        m_prefixBits = floorLog2(m / log2m);
+        m_prefixBits = prefixBitsFor(m, m_bitsForN);
         m_suffixBits = (m_bitsForN - m_prefixBits);
+        m_suffixMask = lowMask(m_suffixBits);
         
         m_numBuckets = 1ULL << m_prefixBits; 
         
@@ -205,60 +207,25 @@ public:
 private:
     u64 m, n, m_numBuckets;
     u32 m_prefixBits, m_suffixBits, m_bitsForM, m_bitsForN, m_suffixOffset;
-    std::vector<u64> m_data; 
-    
-    void checkInput(std::span<const u64> sorted_vals, u64 universe) {
-        if (sorted_vals.empty())  [[unlikely]]
-            throw std::invalid_argument("Empty vector");
-        if (universe == 0) [[unlikely]]
-            throw std::invalid_argument("universe must be > 0");
-        for (auto v : sorted_vals)
-            if (v >= universe) [[unlikely]]
-                throw std::out_of_range("element >= universe");
-        if (!std::is_sorted(sorted_vals.begin(), sorted_vals.end())) [[unlikely]]
-            throw std::invalid_argument("Input vector must be sorted");
-    }
+    u64 m_suffixMask;
+    std::vector<u64> m_data;
 
     u64 s_offset(u64 i) const { return (i - 1) * m_bitsForM; }
     u64 f_offset(u64 i) const { return m_suffixOffset * 64 + i * m_suffixBits; }
 
-    u64 suffixMask() const {
-        if (m_suffixBits == 0)  return 0;
-        if (m_suffixBits == 64) return ~u64(0);
-        return (u64(1) << m_suffixBits) - 1;
-    }
-
     u64 reconstruct(u64 bucket, u64 k) const { return (bucket << m_suffixBits) | getF(k); }
-    u64 getPrefixBits(u64 v) const { return v >> m_suffixBits; };
-    u64 getSuffixBits(u64 v) const { return v & suffixMask(); };
+    u64 getPrefixBits(u64 v) const { return v >> m_suffixBits; }
+    u64 getSuffixBits(u64 v) const { return v & m_suffixMask; }
 
     u64 getS(u64 i) const {
         if (i == 0) return 0;
         if (i == m_numBuckets) return m;
-        return readBits(s_offset(i), m_bitsForM); 
+        return readBits(m_data, s_offset(i), m_bitsForM); 
     };
 
-    void setS(u64 i, u64 val) { writeBits(s_offset(i), m_bitsForM, val); }
-    u64 getF(u64 i) const { return readBits(f_offset(i), m_suffixBits); }
-    void setF(u64 i, u64 val) { writeBits(f_offset(i), m_suffixBits, val); }
-
-    void writeBits(u64 pos, u32 w, u64 val) {
-        if (w == 0) return;
-        u64 word = pos / 64;
-        u32 off = pos % 64;
-        m_data[word] |= (val << off); 
-        m_data[word + 1] |= (val >> 1) >> (63 - off); 
-    }
-
-    u64 readBits(u64 pos, u32 w) const {
-        if (w == 0) return 0;
-        u64 mask = (w == 64) ? ~u64(0) : (u64(1) << w) - 1;
-        u64 word = pos / 64;
-        u32 off = pos % 64;
-        u64 val = m_data[word] >> off;
-        val |= (m_data[word + 1] << 1 << (63 - off));
-        return val & mask;
-    }
+    void setS(u64 i, u64 val) { writeBits(m_data, s_offset(i), m_bitsForM, val); }
+    u64 getF(u64 i) const { return readBits(m_data, f_offset(i), m_suffixBits); }
+    void setF(u64 i, u64 val) { writeBits(m_data, f_offset(i), m_suffixBits, val); }
 
     u64 suffix_upper_bound(u64 lo, u64 hi, u64 suf) const {
         while (lo < hi) {
@@ -275,9 +242,6 @@ private:
         }
         return lo;
     }
-
-    static inline u32 floorLog2(u64 x) { return x <= 1 ? 0 : 63 - std::countl_zero(x); }
-    static inline u32 ceilLog2(u64 x)  { return x <= 1 ? 0 : 64 - std::countl_zero(x - 1); }
 };
 
-static_assert(EF<BucketEFSet2>, "BucketEFSet2 does not satisfy EF concept");
+static_assert(EF<EF2>, "EF2 does not satisfy EF concept");
